@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+    branches: [main, master, dev]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system dependencies & Mold linker (Linux)
+        run: |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ clang mold \
+            libssl-dev libzstd-dev
+          sudo apt-get -qq clean
+          sudo rm -rf /var/lib/apt/lists/*
+          mold --version
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy, rustc-codegen-cranelift
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Clippy
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+        run: cargo clippy --workspace --locked -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    timeout-minutes: 30
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system dependencies & Mold linker (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ clang mold \
+            libssl-dev libzstd-dev
+          sudo apt-get -qq clean
+          sudo rm -rf /var/lib/apt/lists/*
+          mold --version
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustc-codegen-cranelift
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Tests (Linux)
+        if: runner.os == 'Linux'
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+        run: cargo test --workspace --locked
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system dependencies & Mold linker (Linux)
+        run: |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ clang mold \
+            libssl-dev libzstd-dev
+          sudo apt-get -qq clean
+          sudo rm -rf /var/lib/apt/lists/*
+          mold --version
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate Code Coverage
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+        run: cargo llvm-cov --workspace --locked --codecov --output-path codecov.json
+      - uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: codecov.json
+          fail_ci_if_error: false

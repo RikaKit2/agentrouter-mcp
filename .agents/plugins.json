@@ -1,0 +1,10 @@
+{
+  "entries": [
+    {
+      "path": "/home/user/.agents/plugins",
+      "include_only": [
+        "rust"
+      ]
+    }
+  ]
+}
