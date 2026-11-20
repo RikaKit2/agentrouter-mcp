@@ -1,31 +1,45 @@
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 
-/// Request parameters for the `code_review` MCP tool.
+/// Request parameters for the `chat` MCP tool.
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct CodeReviewRequest {
-    /// Brief title or summary of the review target (e.g. "PR #12: Add auth module")
-    pub title: String,
+pub struct ChatRequest {
+    /// The message or prompt to send to the model (e.g. question, instructions, or review prompt).
+    pub message: String,
 
-    /// Git diff or source code changes to review
-    pub diff: String,
+    /// Optional list of file paths to attach as context (e.g. ["crates/foo/src/main.rs", "output_for_sol.md"]).
+    /// Read directly from disk by the server, eliminating token overhead and truncation for the calling agent.
+    pub context_files: Option<Vec<String>>,
 
-    /// Optional context: architecture rules, compiler errors, types, or specific review questions
-    pub context: Option<String>,
+    /// Optional session ID for multi-turn conversations. If provided, chat history is preserved.
+    pub session_id: Option<String>,
 
-    /// Optional model identifier on AgentRouter. If omitted, uses the configured default model.
+    /// Optional system prompt / instructions for the model.
+    pub system_prompt: Option<String>,
+
+    /// Optional model identifier on AgentRouter (e.g. "gpt-6.1-sol"). If omitted, uses configured default model.
     pub model: Option<String>,
+
+    /// If true, clears any existing history for `session_id` before sending this message.
+    pub reset_session: Option<bool>,
+}
+
+/// Request parameters for the `reset_chat` MCP tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResetChatRequest {
+    /// Session identifier to clear from memory.
+    pub session_id: String,
 }
 
 /// Request parameters for the `agentrouter_health` MCP tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct HealthRequest {
-    /// When true, also queries the AgentRouter /models endpoint to verify API token and network connectivity
+    /// When true, also queries the AgentRouter /models endpoint to verify API token and network connectivity.
     pub ping_api: Option<bool>,
 }
 
 /// Message within an OpenAI-compatible chat payload.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -85,6 +99,8 @@ pub struct ApiErrorEnvelope {
 pub struct ResponsesApiRequest {
     pub model: String,
     pub input: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 /// Content block in Responses API message output.

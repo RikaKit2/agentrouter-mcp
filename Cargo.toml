@@ -1,8 +1,8 @@
 [package]
 name = "agentrouter-mcp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-description = "High-performance stdio MCP server for ChatGPT 6.1 Sol code reviews via AgentRouter"
+description = "High-performance model-agnostic stdio MCP server for AgentRouter with context files and session support"
 authors = ["RikaKit2"]
 license = "MIT OR Apache-2.0"
 

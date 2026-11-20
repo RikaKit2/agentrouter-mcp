@@ -1,11 +1,14 @@
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::RwLock;
 
 use crate::{
-    config::AppConfig,
+    config::{ApiMode, AppConfig},
     types::{
         ApiErrorEnvelope, ChatCompletionRequest, ChatCompletionResponse, ChatMessage,
-        CodeReviewRequest, ModelsListResponse, ResponsesApiRequest, ResponsesApiResponse,
+        ModelsListResponse, ResponsesApiRequest, ResponsesApiResponse,
     },
 };
 
@@ -30,36 +33,91 @@ pub enum ClientError {
 pub struct AgentRouterClient {
     http: reqwest::Client,
     config: AppConfig,
+    known_responses_models: Arc<RwLock<HashSet<String>>>,
 }
 
 impl AgentRouterClient {
-    // WHY: AgentRouter WAF requires a known first-party coding tool User-Agent
-    pub const DEFAULT_USER_AGENT: &'static str = "opencode/1.18.25";
-
     pub fn new(config: AppConfig) -> Result<Self, reqwest::Error> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.timeout_secs))
-            .user_agent(Self::DEFAULT_USER_AGENT)
+            .user_agent(&config.user_agent)
             .build()?;
-        Ok(Self { http, config })
+        let known_responses_models = Arc::new(RwLock::new(HashSet::new()));
+        Ok(Self {
+            http,
+            config,
+            known_responses_models,
+        })
     }
 
     pub fn config(&self) -> &AppConfig {
         &self.config
     }
 
-    pub async fn request_review(
+    pub async fn chat(
         &self,
         token: &str,
-        req: &CodeReviewRequest,
+        model: &str,
+        messages: &[ChatMessage],
     ) -> Result<String, ClientError> {
-        let target_model = match &req.model {
-            Some(m) if !m.trim().is_empty() => m.trim(),
-            _ => self.config.default_model.as_str(),
+        let target_model = match model.trim().is_empty() {
+            true => self.config.default_model.as_str(),
+            false => model.trim(),
         };
 
+        let should_use_responses = match self.config.api_mode {
+            ApiMode::Responses => true,
+            ApiMode::Completions => false,
+            ApiMode::Auto => {
+                // Heuristic: models containing "sol" require /v1/responses on AgentRouter,
+                // or any model previously discovered to require it during this session.
+                target_model.contains("sol")
+                    || self
+                        .known_responses_models
+                        .read()
+                        .await
+                        .contains(target_model)
+            }
+        };
+
+        if should_use_responses {
+            return self.chat_via_responses(token, target_model, messages).await;
+        }
+
+        // Attempt chat/completions with automatic fallback to responses if upstream rejects it
+        match self
+            .chat_via_completions(token, target_model, messages)
+            .await
+        {
+            Ok(res) => Ok(res),
+            Err(ClientError::Api { status: 400, message })
+                if message.contains("/v1/responses") =>
+            {
+                tracing::info!(
+                    "Model '{}' requires Responses API. Caching in known_responses_models.",
+                    target_model
+                );
+                self.known_responses_models
+                    .write()
+                    .await
+                    .insert(target_model.to_string());
+                self.chat_via_responses(token, target_model, messages).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn chat_via_completions(
+        &self,
+        token: &str,
+        model: &str,
+        messages: &[ChatMessage],
+    ) -> Result<String, ClientError> {
         let chat_url = format!("{}/chat/completions", self.config.base_url);
-        let chat_payload = self.build_review_payload(req, target_model);
+        let chat_payload = ChatCompletionRequest {
+            model: model.to_string(),
+            messages: messages.to_vec(),
+        };
 
         let resp = self
             .http
@@ -76,30 +134,42 @@ impl AgentRouterClient {
                 let status_code = status.as_u16();
                 let text = resp.text().await.unwrap_or_default();
                 let message = Self::extract_error_message(status_code, &text);
-
-                // Auto-fallback to OpenAI Responses API if upstream requires /v1/responses
-                match status_code == 400 && message.contains("/v1/responses") {
-                    true => {
-                        self.request_review_via_responses(token, req, target_model)
-                            .await
-                    }
-                    false => Err(ClientError::Api {
-                        status: status_code,
-                        message,
-                    }),
-                }
+                Err(ClientError::Api {
+                    status: status_code,
+                    message,
+                })
             }
         }
     }
 
-    async fn request_review_via_responses(
+    async fn chat_via_responses(
         &self,
         token: &str,
-        req: &CodeReviewRequest,
         model: &str,
+        messages: &[ChatMessage],
     ) -> Result<String, ClientError> {
         let url = format!("{}/responses", self.config.base_url);
-        let payload = self.build_responses_payload(req, model);
+
+        // Extract system prompt into top-level instructions if present, per OpenAI Responses API
+        let mut instructions: Option<String> = None;
+        let mut input_messages: Vec<ChatMessage> = Vec::new();
+
+        for msg in messages {
+            match msg.role.as_str() {
+                "system" => {
+                    instructions = Some(msg.content.clone());
+                }
+                _ => {
+                    input_messages.push(msg.clone());
+                }
+            }
+        }
+
+        let payload = ResponsesApiRequest {
+            model: model.to_string(),
+            input: input_messages,
+            instructions,
+        };
 
         let resp = self
             .http
@@ -118,9 +188,8 @@ impl AgentRouterClient {
                     match item.item_type.as_deref() {
                         Some("message") => {
                             for block in item.content {
-                                match block.text {
-                                    Some(txt) => full_text.push_str(&txt),
-                                    None => {}
+                                if let Some(txt) = block.text {
+                                    full_text.push_str(&txt);
                                 }
                             }
                         }
@@ -142,25 +211,6 @@ impl AgentRouterClient {
                     message,
                 })
             }
-        }
-    }
-
-    fn build_responses_payload(&self, req: &CodeReviewRequest, model: &str) -> ResponsesApiRequest {
-        let system_msg = Self::system_prompt();
-        let user_msg = Self::format_user_prompt(req);
-
-        ResponsesApiRequest {
-            model: model.to_string(),
-            input: vec![
-                ChatMessage {
-                    role: "system".to_string(),
-                    content: system_msg,
-                },
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: user_msg,
-                },
-            ],
         }
     }
 
@@ -193,58 +243,6 @@ impl AgentRouterClient {
         Ok(format!("Connection OK ({} models available)", models.len()))
     }
 
-    fn build_review_payload(&self, req: &CodeReviewRequest, model: &str) -> ChatCompletionRequest {
-        let system_msg = Self::system_prompt();
-        let user_msg = Self::format_user_prompt(req);
-
-        ChatCompletionRequest {
-            model: model.to_string(),
-            messages: vec![
-                ChatMessage {
-                    role: "system".to_string(),
-                    content: system_msg,
-                },
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: user_msg,
-                },
-            ],
-        }
-    }
-
-    fn system_prompt() -> String {
-        [
-            "You are an elite principal systems engineer and code reviewer.",
-            "Perform a rigorous, prioritized code review focusing on:",
-            "1. Correctness, edge cases, invariants, data races, and concurrency safety.",
-            "2. Rust: strict borrow checker discipline (no gratuitous clones/Box::leak/unwrap_or_default), cancellation safety in async Tokio code, thiserror/anyhow conventions.",
-            "3. NixOS/Nix: evaluation purity, hermeticity, module options, and flake hygiene.",
-            "4. Structure your response into:",
-            "   - [CRITICAL]: Broken invariants, safety hazards, leaks, or logic bugs.",
-            "   - [WARNING]: Performance bottlenecks, edge case omissions, or questionable patterns.",
-            "   - [SUGGESTION]: Idiomatic refactorings and style improvements.",
-            "   - [VERDICT]: LGTM, LGTM with comments, or Request Changes (with brief summary).",
-            "Be precise, reference exact line numbers/functions, and propose minimal drop-in replacement snippets.",
-        ]
-        .join("\n")
-    }
-
-    fn format_user_prompt(req: &CodeReviewRequest) -> String {
-        let mut prompt = format!("# Title: {}\n\n", req.title);
-        match &req.context {
-            Some(ctx) if !ctx.trim().is_empty() => {
-                prompt.push_str("## Additional Context / Invariants:\n");
-                prompt.push_str(ctx.trim());
-                prompt.push_str("\n\n");
-            }
-            _ => {}
-        }
-        prompt.push_str("## Code Diff / Changes:\n```\n");
-        prompt.push_str(&req.diff);
-        prompt.push_str("\n```\n");
-        prompt
-    }
-
     async fn parse_completion_response(resp: reqwest::Response) -> Result<String, ClientError> {
         let status = resp.status();
         match status.is_success() {
@@ -271,7 +269,7 @@ impl AgentRouterClient {
         match serde_json::from_str::<ApiErrorEnvelope>(body_text) {
             Ok(env) => env.error.message,
             Err(_) => match status {
-                401 => "Invalid AgentRouter API key. Check secret-tool storage.".to_string(),
+                401 => "Invalid AgentRouter API key or unauthorized client.".to_string(),
                 429 => "AgentRouter rate limit exceeded.".to_string(),
                 _ => body_text.to_string(),
             },
