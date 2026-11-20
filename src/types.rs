@@ -79,3 +79,35 @@ pub struct ApiErrorDetail {
 pub struct ApiErrorEnvelope {
     pub error: ApiErrorDetail,
 }
+
+/// Request payload sent to OpenAI Responses API (`/v1/responses`).
+#[derive(Debug, Serialize)]
+pub struct ResponsesApiRequest {
+    pub model: String,
+    pub input: Vec<ChatMessage>,
+}
+
+/// Content block in Responses API message output.
+#[derive(Debug, Deserialize)]
+pub struct ResponseContentBlock {
+    #[allow(dead_code)]
+    #[serde(rename = "type")]
+    pub block_type: Option<String>,
+    pub text: Option<String>,
+}
+
+/// Output item in Responses API response.
+#[derive(Debug, Deserialize)]
+pub struct ResponseOutputItem {
+    #[serde(rename = "type")]
+    pub item_type: Option<String>,
+    #[serde(default)]
+    pub content: Vec<ResponseContentBlock>,
+}
+
+/// Response payload from OpenAI Responses API (`/v1/responses`).
+#[derive(Debug, Deserialize)]
+pub struct ResponsesApiResponse {
+    #[serde(default)]
+    pub output: Vec<ResponseOutputItem>,
+}

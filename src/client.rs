@@ -5,7 +5,7 @@ use crate::{
     config::AppConfig,
     types::{
         ApiErrorEnvelope, ChatCompletionRequest, ChatCompletionResponse, ChatMessage,
-        CodeReviewRequest, ModelsListResponse,
+        CodeReviewRequest, ModelsListResponse, ResponsesApiRequest, ResponsesApiResponse,
     },
 };
 
@@ -33,9 +33,13 @@ pub struct AgentRouterClient {
 }
 
 impl AgentRouterClient {
+    // WHY: AgentRouter WAF requires a known first-party coding tool User-Agent
+    pub const DEFAULT_USER_AGENT: &'static str = "opencode/1.18.25";
+
     pub fn new(config: AppConfig) -> Result<Self, reqwest::Error> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.timeout_secs))
+            .user_agent(Self::DEFAULT_USER_AGENT)
             .build()?;
         Ok(Self { http, config })
     }
@@ -54,8 +58,48 @@ impl AgentRouterClient {
             _ => self.config.default_model.as_str(),
         };
 
-        let payload = self.build_review_payload(req, target_model);
-        let url = format!("{}/chat/completions", self.config.base_url);
+        let chat_url = format!("{}/chat/completions", self.config.base_url);
+        let chat_payload = self.build_review_payload(req, target_model);
+
+        let resp = self
+            .http
+            .post(&chat_url)
+            .bearer_auth(token)
+            .json(&chat_payload)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        match status.is_success() {
+            true => Self::parse_completion_response(resp).await,
+            false => {
+                let status_code = status.as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                let message = Self::extract_error_message(status_code, &text);
+
+                // Auto-fallback to OpenAI Responses API if upstream requires /v1/responses
+                match status_code == 400 && message.contains("/v1/responses") {
+                    true => {
+                        self.request_review_via_responses(token, req, target_model)
+                            .await
+                    }
+                    false => Err(ClientError::Api {
+                        status: status_code,
+                        message,
+                    }),
+                }
+            }
+        }
+    }
+
+    async fn request_review_via_responses(
+        &self,
+        token: &str,
+        req: &CodeReviewRequest,
+        model: &str,
+    ) -> Result<String, ClientError> {
+        let url = format!("{}/responses", self.config.base_url);
+        let payload = self.build_responses_payload(req, model);
 
         let resp = self
             .http
@@ -65,7 +109,59 @@ impl AgentRouterClient {
             .send()
             .await?;
 
-        Self::parse_completion_response(resp).await
+        let status = resp.status();
+        match status.is_success() {
+            true => {
+                let body: ResponsesApiResponse = resp.json().await?;
+                let mut full_text = String::new();
+                for item in body.output {
+                    match item.item_type.as_deref() {
+                        Some("message") => {
+                            for block in item.content {
+                                match block.text {
+                                    Some(txt) => full_text.push_str(&txt),
+                                    None => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                match full_text.trim().is_empty() {
+                    true => Err(ClientError::EmptyChoices),
+                    false => Ok(full_text),
+                }
+            }
+            false => {
+                let status_code = status.as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                let message = Self::extract_error_message(status_code, &text);
+                Err(ClientError::Api {
+                    status: status_code,
+                    message,
+                })
+            }
+        }
+    }
+
+    fn build_responses_payload(&self, req: &CodeReviewRequest, model: &str) -> ResponsesApiRequest {
+        let system_msg = Self::system_prompt();
+        let user_msg = Self::format_user_prompt(req);
+
+        ResponsesApiRequest {
+            model: model.to_string(),
+            input: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: system_msg,
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: user_msg,
+                },
+            ],
+        }
     }
 
     pub async fn list_models(&self, token: &str) -> Result<Vec<String>, ClientError> {
