@@ -16,6 +16,17 @@ pub struct AppConfig {
     pub key_cmd: String,
 }
 
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            default_model: Self::DEFAULT_FALLBACK_MODEL.to_string(),
+            base_url: Self::DEFAULT_BASE_URL.to_string(),
+            timeout_secs: Self::DEFAULT_TIMEOUT_SECS,
+            key_cmd: Self::DEFAULT_KEY_CMD.to_string(),
+        }
+    }
+}
+
 impl AppConfig {
     pub const DEFAULT_BASE_URL: &'static str = "https://agentrouter.org/v1";
     pub const DEFAULT_FALLBACK_MODEL: &'static str = "gpt-6.1-sol";
@@ -30,12 +41,7 @@ impl AppConfig {
     /// 3. `.env` file (specified via `--env-file` or found in project/current directory)
     /// 4. Built-in defaults
     pub fn from_args() -> Self {
-        let mut config = Self {
-            default_model: Self::DEFAULT_FALLBACK_MODEL.to_string(),
-            base_url: Self::DEFAULT_BASE_URL.to_string(),
-            timeout_secs: Self::DEFAULT_TIMEOUT_SECS,
-            key_cmd: Self::DEFAULT_KEY_CMD.to_string(),
-        };
+        let mut config = Self::default();
 
         // 1. Scan for custom --env-file in args or look in standard locations
         let args: Vec<String> = std::env::args().collect();
@@ -56,25 +62,30 @@ impl AppConfig {
         Self::load_env_file_hierarchy(&mut config, custom_env_file.as_deref());
 
         // 2. Overlay process environment variables
-        if let Ok(cmd) = std::env::var("AGENTROUTER_KEY_CMD") {
-            if !cmd.trim().is_empty() {
+        match std::env::var("AGENTROUTER_KEY_CMD") {
+            Ok(cmd) if !cmd.trim().is_empty() => {
                 config.key_cmd = cmd.trim().to_string();
             }
+            _ => {}
         }
-        if let Ok(model) = std::env::var("AGENTROUTER_DEFAULT_MODEL") {
-            if !model.trim().is_empty() {
+        match std::env::var("AGENTROUTER_DEFAULT_MODEL") {
+            Ok(model) if !model.trim().is_empty() => {
                 config.default_model = model.trim().to_string();
             }
+            _ => {}
         }
-        if let Ok(url) = std::env::var("AGENTROUTER_BASE_URL") {
-            if !url.trim().is_empty() {
+        match std::env::var("AGENTROUTER_BASE_URL") {
+            Ok(url) if !url.trim().is_empty() => {
                 config.base_url = url.trim().trim_end_matches('/').to_string();
             }
+            _ => {}
         }
-        if let Ok(t) = std::env::var("AGENTROUTER_TIMEOUT") {
-            if let Ok(val) = t.parse::<u64>() {
-                config.timeout_secs = val;
-            }
+        match std::env::var("AGENTROUTER_TIMEOUT") {
+            Ok(t) => match t.parse::<u64>() {
+                Ok(val) => config.timeout_secs = val,
+                Err(_) => {}
+            },
+            _ => {}
         }
 
         // 3. Overlay explicit CLI arguments (highest priority)
@@ -145,21 +156,25 @@ impl AppConfig {
     }
 
     fn load_env_file_hierarchy(config: &mut Self, custom_path: Option<&Path>) {
-        if let Some(path) = custom_path {
-            Self::apply_env_file(path, config);
-            return;
-        }
-
-        // Try standard locations
-        let candidates = [
-            PathBuf::from(".env"),
-            PathBuf::from("/home/user/projects/agentrouter-mcp/.env"),
-        ];
-
-        for path in &candidates {
-            if path.is_file() {
+        match custom_path {
+            Some(path) => {
                 Self::apply_env_file(path, config);
-                break;
+            }
+            None => {
+                let candidates = [
+                    PathBuf::from(".env"),
+                    PathBuf::from("/home/user/projects/agentrouter-mcp/.env"),
+                ];
+
+                for path in &candidates {
+                    match path.is_file() {
+                        true => {
+                            Self::apply_env_file(path, config);
+                            break;
+                        }
+                        false => {}
+                    }
+                }
             }
         }
     }
@@ -176,27 +191,43 @@ impl AppConfig {
                 continue;
             }
             let clean_line = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
-            if let Some((k, v)) = clean_line.split_once('=') {
-                let key = k.trim();
-                let val = v.trim().trim_matches('"').trim_matches('\'').trim();
-                match key {
-                    "AGENTROUTER_KEY_CMD" | "KEY_CMD" if !val.is_empty() => {
-                        config.key_cmd = val.to_string();
-                    }
-                    "AGENTROUTER_DEFAULT_MODEL" | "DEFAULT_MODEL" if !val.is_empty() => {
-                        config.default_model = val.to_string();
-                    }
-                    "AGENTROUTER_BASE_URL" | "BASE_URL" if !val.is_empty() => {
-                        config.base_url = val.trim_end_matches('/').to_string();
-                    }
-                    "AGENTROUTER_TIMEOUT" | "TIMEOUT" => {
-                        if let Ok(t) = val.parse::<u64>() {
-                            config.timeout_secs = t;
+            match clean_line.split_once('=') {
+                Some((k, v)) => {
+                    let key = k.trim();
+                    let val = v.trim().trim_matches('"').trim_matches('\'').trim();
+                    match key {
+                        "AGENTROUTER_KEY_CMD" | "KEY_CMD" if !val.is_empty() => {
+                            config.key_cmd = val.to_string();
                         }
+                        "AGENTROUTER_DEFAULT_MODEL" | "DEFAULT_MODEL" if !val.is_empty() => {
+                            config.default_model = val.to_string();
+                        }
+                        "AGENTROUTER_BASE_URL" | "BASE_URL" if !val.is_empty() => {
+                            config.base_url = val.trim_end_matches('/').to_string();
+                        }
+                        "AGENTROUTER_TIMEOUT" | "TIMEOUT" => match val.parse::<u64>() {
+                            Ok(t) => config.timeout_secs = t,
+                            Err(_) => {}
+                        },
+                        _ => {}
                     }
-                    _ => {}
                 }
+                None => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config_values() {
+        let config = AppConfig::default();
+        assert_eq!(config.default_model, AppConfig::DEFAULT_FALLBACK_MODEL);
+        assert_eq!(config.base_url, AppConfig::DEFAULT_BASE_URL);
+        assert_eq!(config.timeout_secs, AppConfig::DEFAULT_TIMEOUT_SECS);
+        assert_eq!(config.key_cmd, AppConfig::DEFAULT_KEY_CMD);
     }
 }

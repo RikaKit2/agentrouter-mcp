@@ -1,3 +1,6 @@
+// WHY: User invariant in rust-workflow explicitly enforces match-first style over if let
+#![allow(clippy::single_match)]
+
 mod auth;
 mod client;
 mod config;

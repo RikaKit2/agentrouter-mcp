@@ -71,3 +71,33 @@ pub fn mask_token(token: &str) -> String {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_command_error() {
+        let res = fetch_token_from_cmd("");
+        assert!(matches!(res, Err(AuthError::EmptyCommand)));
+    }
+
+    #[test]
+    fn test_whitespace_command_error() {
+        let res = fetch_token_from_cmd("   ");
+        assert!(matches!(res, Err(AuthError::EmptyCommand)));
+    }
+
+    #[test]
+    fn test_successful_echo_token() {
+        let res = fetch_token_from_cmd("echo 'test-token-1234'");
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), "test-token-1234");
+    }
+
+    #[test]
+    fn test_mask_token() {
+        assert_eq!(mask_token("short"), "********");
+        assert_eq!(mask_token("12345678901234"), "1234...1234 (14 chars)");
+    }
+}
