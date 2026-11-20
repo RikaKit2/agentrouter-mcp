@@ -1,5 +1,10 @@
 [advisories]
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0543: chrono is unmaintained.
+    # Transitive via rmcp -> chrono and schemars -> chrono.
+    # Upstream migration to jiff/time pending in rmcp/schemars; informational unmaintained warning, not an exploit.
+    "RUSTSEC-2026-0543",
+]
 
 [yanked]
 # enabled = false
