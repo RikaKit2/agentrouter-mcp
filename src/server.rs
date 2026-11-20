@@ -60,9 +60,7 @@ impl AgentRouterServer {
         }
     }
 
-    #[tool(
-        description = "Alias for code_review. Retained for backward-compatible invocations."
-    )]
+    #[tool(description = "Alias for code_review. Retained for backward-compatible invocations.")]
     async fn sol_code_review(
         &self,
         params: Parameters<CodeReviewRequest>,
@@ -70,9 +68,7 @@ impl AgentRouterServer {
         self.code_review(params).await
     }
 
-    #[tool(
-        description = "List all models currently available and active on AgentRouter."
-    )]
+    #[tool(description = "List all models currently available and active on AgentRouter.")]
     async fn list_models(&self) -> Result<String, String> {
         info!("Executing list_models request");
 
@@ -106,9 +102,7 @@ impl AgentRouterServer {
         }
     }
 
-    #[tool(
-        description = "Check key retrieval command and connectivity to AgentRouter."
-    )]
+    #[tool(description = "Check key retrieval command and connectivity to AgentRouter.")]
     async fn agentrouter_health(
         &self,
         Parameters(req): Parameters<HealthRequest>,

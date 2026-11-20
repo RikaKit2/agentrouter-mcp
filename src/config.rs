@@ -108,13 +108,29 @@ impl AppConfig {
                     eprintln!("Usage: agentrouter-mcp [OPTIONS]");
                     eprintln!();
                     eprintln!("Options:");
-                    eprintln!("  -k, --key-cmd <COMMAND>      Shell command to retrieve API key on-demand");
-                    eprintln!("                               (default: {})", Self::DEFAULT_KEY_CMD);
-                    eprintln!("  -m, --default-model <MODEL>  Default model when not specified in tool calls");
-                    eprintln!("                               (default: {})", Self::DEFAULT_FALLBACK_MODEL);
+                    eprintln!(
+                        "  -k, --key-cmd <COMMAND>      Shell command to retrieve API key on-demand"
+                    );
+                    eprintln!(
+                        "                               (default: {})",
+                        Self::DEFAULT_KEY_CMD
+                    );
+                    eprintln!(
+                        "  -m, --default-model <MODEL>  Default model when not specified in tool calls"
+                    );
+                    eprintln!(
+                        "                               (default: {})",
+                        Self::DEFAULT_FALLBACK_MODEL
+                    );
                     eprintln!("  -u, --base-url <URL>        Base URL for AgentRouter API");
-                    eprintln!("                               (default: {})", Self::DEFAULT_BASE_URL);
-                    eprintln!("  -t, --timeout <SECS>        HTTP timeout in seconds (default: {})", Self::DEFAULT_TIMEOUT_SECS);
+                    eprintln!(
+                        "                               (default: {})",
+                        Self::DEFAULT_BASE_URL
+                    );
+                    eprintln!(
+                        "  -t, --timeout <SECS>        HTTP timeout in seconds (default: {})",
+                        Self::DEFAULT_TIMEOUT_SECS
+                    );
                     eprintln!("      --env-file <PATH>       Path to .env configuration file");
                     eprintln!("  -h, --help                  Print this help message");
                     std::process::exit(0);

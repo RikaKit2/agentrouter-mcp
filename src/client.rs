@@ -70,12 +70,7 @@ impl AgentRouterClient {
 
     pub async fn list_models(&self, token: &str) -> Result<Vec<String>, ClientError> {
         let url = format!("{}/models", self.config.base_url);
-        let resp = self
-            .http
-            .get(&url)
-            .bearer_auth(token)
-            .send()
-            .await?;
+        let resp = self.http.get(&url).bearer_auth(token).send().await?;
 
         let status = resp.status();
         match status.is_success() {
@@ -102,11 +97,7 @@ impl AgentRouterClient {
         Ok(format!("Connection OK ({} models available)", models.len()))
     }
 
-    fn build_review_payload(
-        &self,
-        req: &CodeReviewRequest,
-        model: &str,
-    ) -> ChatCompletionRequest {
+    fn build_review_payload(&self, req: &CodeReviewRequest, model: &str) -> ChatCompletionRequest {
         let system_msg = Self::system_prompt();
         let user_msg = Self::format_user_prompt(req);
 

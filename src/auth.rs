@@ -33,9 +33,7 @@ pub fn fetch_token_from_cmd(key_cmd: &str) -> Result<String, AuthError> {
     match trimmed_cmd.is_empty() {
         true => Err(AuthError::EmptyCommand),
         false => {
-            let output = Command::new("sh")
-                .args(["-c", trimmed_cmd])
-                .output()?;
+            let output = Command::new("sh").args(["-c", trimmed_cmd]).output()?;
 
             match output.status.success() {
                 true => {

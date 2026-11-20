@@ -14,9 +14,7 @@ use crate::{config::AppConfig, server::AgentRouterServer};
 async fn main() -> Result<()> {
     // Write logs strictly to stderr; stdout is reserved exclusively for MCP JSON-RPC protocol
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()),
-        )
+        .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
