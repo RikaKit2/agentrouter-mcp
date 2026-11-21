@@ -1,5 +1,5 @@
-use std::process::Command;
 use thiserror::Error;
+use tokio::process::Command;
 
 /// Domain errors encountered during credential retrieval.
 #[derive(Debug, Error)]
@@ -24,16 +24,19 @@ pub enum AuthError {
     InvalidUtf8(#[from] std::string::FromUtf8Error),
 }
 
-/// Retrieve the AgentRouter API key on-demand by executing the configured shell command.
+/// Retrieve the AgentRouter API key on-demand by executing the configured shell command asynchronously.
 ///
 /// This delegates secret retrieval to an external command (e.g. secret-tool, pass, rbw),
 /// avoiding any hardcoding in the binary and keeping plaintext credentials out of disk files.
-pub fn fetch_token_from_cmd(key_cmd: &str) -> Result<String, AuthError> {
+pub async fn fetch_token_from_cmd(key_cmd: &str) -> Result<String, AuthError> {
     let trimmed_cmd = key_cmd.trim();
     match trimmed_cmd.is_empty() {
         true => Err(AuthError::EmptyCommand),
         false => {
-            let output = Command::new("sh").args(["-c", trimmed_cmd]).output()?;
+            let output = Command::new("sh")
+                .args(["-c", trimmed_cmd])
+                .output()
+                .await?;
 
             match output.status.success() {
                 true => {
@@ -59,6 +62,18 @@ pub fn fetch_token_from_cmd(key_cmd: &str) -> Result<String, AuthError> {
     }
 }
 
+/// Resolve the active API token, preferring an explicit API key if provided,
+/// or falling back to on-demand execution of `key_cmd`.
+pub async fn resolve_token(api_key: Option<&str>, key_cmd: &str) -> Result<String, AuthError> {
+    if let Some(key) = api_key {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    fetch_token_from_cmd(key_cmd).await
+}
+
 /// Safely mask a token for status messages without leaking secrets.
 pub fn mask_token(token: &str) -> String {
     let len = token.chars().count();
@@ -76,23 +91,32 @@ pub fn mask_token(token: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_empty_command_error() {
-        let res = fetch_token_from_cmd("");
+    #[tokio::test]
+    async fn test_empty_command_error() {
+        let res = fetch_token_from_cmd("").await;
         assert!(matches!(res, Err(AuthError::EmptyCommand)));
     }
 
-    #[test]
-    fn test_whitespace_command_error() {
-        let res = fetch_token_from_cmd("   ");
+    #[tokio::test]
+    async fn test_whitespace_command_error() {
+        let res = fetch_token_from_cmd("   ").await;
         assert!(matches!(res, Err(AuthError::EmptyCommand)));
     }
 
-    #[test]
-    fn test_successful_echo_token() {
-        let res = fetch_token_from_cmd("echo 'test-token-1234'");
+    #[tokio::test]
+    async fn test_successful_echo_token() {
+        let res = fetch_token_from_cmd("echo 'test-token-1234'").await;
         assert!(res.is_ok());
         assert_eq!(res.unwrap(), "test-token-1234");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_token_precedence() {
+        let res = resolve_token(Some("direct-token"), "invalid-cmd").await;
+        assert_eq!(res.unwrap(), "direct-token");
+
+        let res_cmd = resolve_token(None, "echo 'cmd-token'").await;
+        assert_eq!(res_cmd.unwrap(), "cmd-token");
     }
 
     #[test]

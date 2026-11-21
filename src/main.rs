@@ -23,12 +23,17 @@ async fn main() -> Result<()> {
         .init();
 
     let config = AppConfig::from_args();
+    let key_source = match config.api_key.is_some() {
+        true => "static AGENTROUTER_API_KEY".to_string(),
+        false => format!("key_cmd: '{}'", config.key_cmd),
+    };
     tracing::info!(
-        "Initializing AgentRouter MCP server (default_model: '{}', key_cmd: '{}', base_url: '{}', timeout: {}s)",
+        "Initializing AgentRouter MCP server (default_model: '{}', key_source: '{}', base_url: '{}', timeout: {}s, api_mode: '{:?}')",
         config.default_model,
-        config.key_cmd,
+        key_source,
         config.base_url,
-        config.timeout_secs
+        config.timeout_secs,
+        config.api_mode
     );
 
     let server = AgentRouterServer::new(config)?;

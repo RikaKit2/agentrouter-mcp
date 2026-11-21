@@ -43,6 +43,9 @@ pub struct AppConfig {
     /// Shell command executed on-demand to retrieve the API key from a secure vault/tool
     pub key_cmd: String,
 
+    /// Optional static API key (bypasses executing `key_cmd` if set)
+    pub api_key: Option<String>,
+
     /// API endpoint routing mode (auto, responses, completions)
     pub api_mode: ApiMode,
 
@@ -57,6 +60,7 @@ impl Default for AppConfig {
             base_url: Self::DEFAULT_BASE_URL.to_string(),
             timeout_secs: Self::DEFAULT_TIMEOUT_SECS,
             key_cmd: Self::DEFAULT_KEY_CMD.to_string(),
+            api_key: None,
             api_mode: ApiMode::default(),
             user_agent: Self::DEFAULT_USER_AGENT.to_string(),
         }
@@ -93,6 +97,12 @@ impl AppConfig {
         Self::load_env_file_hierarchy(&mut config, custom_env_file.as_deref());
 
         // 2. Overlay process environment variables
+        match std::env::var("AGENTROUTER_API_KEY") {
+            Ok(key) if !key.trim().is_empty() => {
+                config.api_key = Some(key.trim().to_string());
+            }
+            _ => {}
+        }
         match std::env::var("AGENTROUTER_KEY_CMD") {
             Ok(cmd) if !cmd.trim().is_empty() => {
                 config.key_cmd = cmd.trim().to_string();
@@ -112,16 +122,16 @@ impl AppConfig {
             _ => {}
         }
         match std::env::var("AGENTROUTER_TIMEOUT") {
-            Ok(t) => match t.parse::<u64>() {
+            Ok(t) if !t.trim().is_empty() => match t.parse::<u64>() {
                 Ok(val) => config.timeout_secs = val,
-                Err(_) => {}
+                Err(e) => eprintln!("Warning: invalid AGENTROUTER_TIMEOUT '{t}': {e}"),
             },
             _ => {}
         }
         match std::env::var("AGENTROUTER_API_MODE") {
-            Ok(mode_str) => match ApiMode::from_str(&mode_str) {
+            Ok(mode_str) if !mode_str.trim().is_empty() => match ApiMode::from_str(&mode_str) {
                 Ok(m) => config.api_mode = m,
-                Err(_) => {}
+                Err(e) => eprintln!("Warning: invalid AGENTROUTER_API_MODE '{mode_str}': {e}"),
             },
             _ => {}
         }
@@ -136,6 +146,10 @@ impl AppConfig {
         let mut i = 1;
         while i < args.len() {
             match args[i].as_str() {
+                "--api-key" if i + 1 < args.len() => {
+                    config.api_key = Some(args[i + 1].trim().to_string());
+                    i += 2;
+                }
                 "--key-cmd" | "-k" if i + 1 < args.len() => {
                     config.key_cmd = args[i + 1].trim().to_string();
                     i += 2;
@@ -149,14 +163,22 @@ impl AppConfig {
                     i += 2;
                 }
                 "--timeout" | "-t" if i + 1 < args.len() => {
-                    if let Ok(val) = args[i + 1].parse::<u64>() {
-                        config.timeout_secs = val;
+                    match args[i + 1].parse::<u64>() {
+                        Ok(val) => config.timeout_secs = val,
+                        Err(e) => {
+                            eprintln!("Error: invalid value for --timeout '{}': {e}", args[i + 1]);
+                            std::process::exit(1);
+                        }
                     }
                     i += 2;
                 }
                 "--api-mode" | "-a" if i + 1 < args.len() => {
-                    if let Ok(m) = ApiMode::from_str(&args[i + 1]) {
-                        config.api_mode = m;
+                    match ApiMode::from_str(&args[i + 1]) {
+                        Ok(m) => config.api_mode = m,
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                            std::process::exit(1);
+                        }
                     }
                     i += 2;
                 }
@@ -173,6 +195,7 @@ impl AppConfig {
                     eprintln!("Usage: agentrouter-mcp [OPTIONS]");
                     eprintln!();
                     eprintln!("Options:");
+                    eprintln!("      --api-key <KEY>         Static API key (overrides --key-cmd)");
                     eprintln!(
                         "  -k, --key-cmd <COMMAND>      Shell command to retrieve API key on-demand"
                     );
@@ -222,10 +245,19 @@ impl AppConfig {
                 Self::apply_env_file(path, config);
             }
             None => {
-                let candidates = [
-                    PathBuf::from(".env"),
-                    PathBuf::from("/home/user/projects/agentrouter-mcp/.env"),
-                ];
+                let mut candidates = vec![PathBuf::from(".env")];
+                match std::env::var("XDG_CONFIG_HOME") {
+                    Ok(xdg) if !xdg.trim().is_empty() => {
+                        candidates.push(PathBuf::from(xdg).join("agentrouter-mcp/.env"));
+                    }
+                    _ => match std::env::var("HOME") {
+                        Ok(home) if !home.trim().is_empty() => {
+                            candidates
+                                .push(PathBuf::from(home).join(".config/agentrouter-mcp/.env"));
+                        }
+                        _ => {}
+                    },
+                }
 
                 for path in &candidates {
                     match path.is_file() {
@@ -257,6 +289,9 @@ impl AppConfig {
                     let key = k.trim();
                     let val = v.trim().trim_matches('"').trim_matches('\'').trim();
                     match key {
+                        "AGENTROUTER_API_KEY" | "API_KEY" if !val.is_empty() => {
+                            config.api_key = Some(val.to_string());
+                        }
                         "AGENTROUTER_KEY_CMD" | "KEY_CMD" if !val.is_empty() => {
                             config.key_cmd = val.to_string();
                         }
@@ -268,13 +303,12 @@ impl AppConfig {
                         }
                         "AGENTROUTER_TIMEOUT" | "TIMEOUT" => match val.parse::<u64>() {
                             Ok(t) => config.timeout_secs = t,
-                            Err(_) => {}
+                            Err(e) => eprintln!("Warning: invalid TIMEOUT in .env '{val}': {e}"),
                         },
-                        "AGENTROUTER_API_MODE" | "API_MODE" => {
-                            if let Ok(m) = ApiMode::from_str(val) {
-                                config.api_mode = m;
-                            }
-                        }
+                        "AGENTROUTER_API_MODE" | "API_MODE" => match ApiMode::from_str(val) {
+                            Ok(m) => config.api_mode = m,
+                            Err(e) => eprintln!("Warning: invalid API_MODE in .env '{val}': {e}"),
+                        },
                         "AGENTROUTER_USER_AGENT" | "USER_AGENT" if !val.is_empty() => {
                             config.user_agent = val.to_string();
                         }
@@ -298,6 +332,7 @@ mod tests {
         assert_eq!(config.base_url, AppConfig::DEFAULT_BASE_URL);
         assert_eq!(config.timeout_secs, AppConfig::DEFAULT_TIMEOUT_SECS);
         assert_eq!(config.key_cmd, AppConfig::DEFAULT_KEY_CMD);
+        assert_eq!(config.api_key, None);
         assert_eq!(config.api_mode, ApiMode::Auto);
         assert_eq!(config.user_agent, AppConfig::DEFAULT_USER_AGENT);
     }
@@ -306,6 +341,9 @@ mod tests {
     fn test_api_mode_parsing() {
         assert_eq!(ApiMode::from_str("auto").unwrap(), ApiMode::Auto);
         assert_eq!(ApiMode::from_str("responses").unwrap(), ApiMode::Responses);
-        assert_eq!(ApiMode::from_str("completions").unwrap(), ApiMode::Completions);
+        assert_eq!(
+            ApiMode::from_str("completions").unwrap(),
+            ApiMode::Completions
+        );
     }
 }

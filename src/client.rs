@@ -68,16 +68,11 @@ impl AgentRouterClient {
         let should_use_responses = match self.config.api_mode {
             ApiMode::Responses => true,
             ApiMode::Completions => false,
-            ApiMode::Auto => {
-                // Heuristic: models containing "sol" require /v1/responses on AgentRouter,
-                // or any model previously discovered to require it during this session.
-                target_model.contains("sol")
-                    || self
-                        .known_responses_models
-                        .read()
-                        .await
-                        .contains(target_model)
-            }
+            ApiMode::Auto => self
+                .known_responses_models
+                .read()
+                .await
+                .contains(target_model),
         };
 
         if should_use_responses {
@@ -90,9 +85,10 @@ impl AgentRouterClient {
             .await
         {
             Ok(res) => Ok(res),
-            Err(ClientError::Api { status: 400, message })
-                if message.contains("/v1/responses") =>
-            {
+            Err(ClientError::Api {
+                status: 400,
+                message,
+            }) if message.contains("/v1/responses") => {
                 tracing::info!(
                     "Model '{}' requires Responses API. Caching in known_responses_models.",
                     target_model
@@ -150,15 +146,22 @@ impl AgentRouterClient {
     ) -> Result<String, ClientError> {
         let url = format!("{}/responses", self.config.base_url);
 
-        // Extract system prompt into top-level instructions if present, per OpenAI Responses API
+        // Extract system prompt into top-level instructions if present, per OpenAI Responses API.
+        // If multiple system prompts are present, concatenate them with newlines.
         let mut instructions: Option<String> = None;
         let mut input_messages: Vec<ChatMessage> = Vec::new();
 
         for msg in messages {
             match msg.role.as_str() {
-                "system" => {
-                    instructions = Some(msg.content.clone());
-                }
+                "system" => match instructions.as_mut() {
+                    Some(existing) => {
+                        existing.push_str("\n\n");
+                        existing.push_str(&msg.content);
+                    }
+                    None => {
+                        instructions = Some(msg.content.clone());
+                    }
+                },
                 _ => {
                     input_messages.push(msg.clone());
                 }
@@ -244,24 +247,10 @@ impl AgentRouterClient {
     }
 
     async fn parse_completion_response(resp: reqwest::Response) -> Result<String, ClientError> {
-        let status = resp.status();
-        match status.is_success() {
-            true => {
-                let body: ChatCompletionResponse = resp.json().await?;
-                match body.choices.into_iter().next() {
-                    Some(choice) => Ok(choice.message.content),
-                    None => Err(ClientError::EmptyChoices),
-                }
-            }
-            false => {
-                let status_code = status.as_u16();
-                let text = resp.text().await.unwrap_or_default();
-                let message = Self::extract_error_message(status_code, &text);
-                Err(ClientError::Api {
-                    status: status_code,
-                    message,
-                })
-            }
+        let body: ChatCompletionResponse = resp.json().await?;
+        match body.choices.into_iter().next() {
+            Some(choice) => Ok(choice.message.content),
+            None => Err(ClientError::EmptyChoices),
         }
     }
 
