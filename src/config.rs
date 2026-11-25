@@ -51,6 +51,12 @@ pub struct AppConfig {
 
     /// User-Agent header sent to AgentRouter to satisfy Cloudflare WAF validation
     pub user_agent: String,
+
+    /// Directory where persistent conversation sessions are stored as JSON files
+    pub sessions_dir: PathBuf,
+
+    /// Maximum number of messages retained per session history (>= 1)
+    pub max_history_messages: usize,
 }
 
 impl Default for AppConfig {
@@ -63,6 +69,8 @@ impl Default for AppConfig {
             api_key: None,
             api_mode: ApiMode::default(),
             user_agent: Self::DEFAULT_USER_AGENT.to_string(),
+            sessions_dir: Self::default_sessions_dir(),
+            max_history_messages: Self::DEFAULT_MAX_HISTORY_MESSAGES,
         }
     }
 }
@@ -73,6 +81,39 @@ impl AppConfig {
     pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
     pub const DEFAULT_KEY_CMD: &'static str = "secret-tool lookup service agentrouter";
     pub const DEFAULT_USER_AGENT: &'static str = "opencode/1.18.25";
+    pub const DEFAULT_MAX_HISTORY_MESSAGES: usize = 30;
+
+    /// Resolve the default directory for session persistence using XDG / HOME / temp_dir fallback.
+    pub fn default_sessions_dir() -> PathBuf {
+        let xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
+        let home_dir = std::env::var("HOME").ok();
+        Self::resolve_default_sessions_dir(xdg_data_home.as_deref(), home_dir.as_deref())
+    }
+
+    fn resolve_default_sessions_dir(
+        xdg_data_home: Option<&str>,
+        home_dir: Option<&str>,
+    ) -> PathBuf {
+        match xdg_data_home {
+            Some(xdg) if !xdg.trim().is_empty() => {
+                PathBuf::from(xdg.trim()).join("agentrouter-mcp/sessions")
+            }
+            _ => match home_dir {
+                Some(home) if !home.trim().is_empty() => {
+                    PathBuf::from(home.trim()).join(".local/share/agentrouter-mcp/sessions")
+                }
+                _ => std::env::temp_dir().join("agentrouter-mcp/sessions"),
+            },
+        }
+    }
+
+    fn parse_max_history(raw: &str) -> Result<usize, String> {
+        match raw.trim().parse::<usize>() {
+            Ok(0) => Err("value must be >= 1".to_string()),
+            Ok(val) => Ok(val),
+            Err(e) => Err(e.to_string()),
+        }
+    }
 
     /// Parse configuration from CLI arguments, environment variables, and optional .env files.
     pub fn from_args() -> Self {
@@ -141,8 +182,35 @@ impl AppConfig {
             }
             _ => {}
         }
+        match std::env::var("AGENTROUTER_SESSIONS_DIR") {
+            Ok(dir) if !dir.trim().is_empty() => {
+                config.sessions_dir = PathBuf::from(dir.trim());
+            }
+            _ => {}
+        }
+        match std::env::var("AGENTROUTER_MAX_HISTORY") {
+            Ok(raw) if !raw.trim().is_empty() => match Self::parse_max_history(&raw) {
+                Ok(val) => config.max_history_messages = val,
+                Err(e) => eprintln!("Warning: invalid AGENTROUTER_MAX_HISTORY '{raw}': {e}"),
+            },
+            _ => {}
+        }
 
         // 3. Overlay explicit CLI arguments (highest priority)
+        match Self::apply_cli_args(&mut config, &args) {
+            Ok(true) => config,
+            Ok(false) => {
+                Self::print_help();
+                std::process::exit(0);
+            }
+            Err(msg) => {
+                eprintln!("Error: {msg}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    fn apply_cli_args(config: &mut Self, args: &[String]) -> Result<bool, String> {
         let mut i = 1;
         while i < args.len() {
             match args[i].as_str() {
@@ -166,77 +234,102 @@ impl AppConfig {
                     match args[i + 1].parse::<u64>() {
                         Ok(val) => config.timeout_secs = val,
                         Err(e) => {
-                            eprintln!("Error: invalid value for --timeout '{}': {e}", args[i + 1]);
-                            std::process::exit(1);
+                            return Err(format!(
+                                "invalid value for --timeout '{}': {e}",
+                                args[i + 1]
+                            ));
                         }
                     }
                     i += 2;
                 }
                 "--api-mode" | "-a" if i + 1 < args.len() => {
-                    match ApiMode::from_str(&args[i + 1]) {
-                        Ok(m) => config.api_mode = m,
-                        Err(e) => {
-                            eprintln!("Error: {e}");
-                            std::process::exit(1);
-                        }
-                    }
+                    config.api_mode = ApiMode::from_str(&args[i + 1])?;
                     i += 2;
                 }
                 "--user-agent" if i + 1 < args.len() => {
                     config.user_agent = args[i + 1].trim().to_string();
                     i += 2;
                 }
+                "--sessions-dir" if i + 1 < args.len() => {
+                    let trimmed = args[i + 1].trim();
+                    match trimmed.is_empty() {
+                        true => {
+                            return Err("invalid value for --sessions-dir: path cannot be empty"
+                                .to_string());
+                        }
+                        false => config.sessions_dir = PathBuf::from(trimmed),
+                    }
+                    i += 2;
+                }
+                "--max-history" if i + 1 < args.len() => {
+                    match Self::parse_max_history(&args[i + 1]) {
+                        Ok(val) => config.max_history_messages = val,
+                        Err(e) => {
+                            return Err(format!(
+                                "invalid value for --max-history '{}': {e}",
+                                args[i + 1]
+                            ));
+                        }
+                    }
+                    i += 2;
+                }
                 "--env-file" if i + 1 < args.len() => {
                     i += 2; // already handled in step 1
                 }
                 "--help" | "-h" => {
-                    eprintln!("agentrouter-mcp: Model-agnostic MCP server for AgentRouter");
-                    eprintln!();
-                    eprintln!("Usage: agentrouter-mcp [OPTIONS]");
-                    eprintln!();
-                    eprintln!("Options:");
-                    eprintln!("      --api-key <KEY>         Static API key (overrides --key-cmd)");
-                    eprintln!(
-                        "  -k, --key-cmd <COMMAND>      Shell command to retrieve API key on-demand"
-                    );
-                    eprintln!(
-                        "                               (default: {})",
-                        Self::DEFAULT_KEY_CMD
-                    );
-                    eprintln!(
-                        "  -m, --default-model <MODEL>  Default model when not specified in tool calls"
-                    );
-                    eprintln!(
-                        "                               (default: {})",
-                        Self::DEFAULT_FALLBACK_MODEL
-                    );
-                    eprintln!("  -u, --base-url <URL>        Base URL for AgentRouter API");
-                    eprintln!(
-                        "                               (default: {})",
-                        Self::DEFAULT_BASE_URL
-                    );
-                    eprintln!(
-                        "  -t, --timeout <SECS>        HTTP timeout in seconds (default: {})",
-                        Self::DEFAULT_TIMEOUT_SECS
-                    );
-                    eprintln!(
-                        "  -a, --api-mode <MODE>       API routing mode: auto (default), responses, completions"
-                    );
-                    eprintln!(
-                        "      --user-agent <UA>       User-Agent header for Cloudflare WAF (default: {})",
-                        Self::DEFAULT_USER_AGENT
-                    );
-                    eprintln!("      --env-file <PATH>       Path to .env configuration file");
-                    eprintln!("  -h, --help                  Print this help message");
-                    std::process::exit(0);
+                    return Ok(false);
                 }
                 _ => {
                     i += 1;
                 }
             }
         }
+        Ok(true)
+    }
 
-        config
+    fn print_help() {
+        eprintln!("agentrouter-mcp: Model-agnostic MCP server for AgentRouter");
+        eprintln!();
+        eprintln!("Usage: agentrouter-mcp [OPTIONS]");
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!("      --api-key <KEY>         Static API key (overrides --key-cmd)");
+        eprintln!("  -k, --key-cmd <COMMAND>      Shell command to retrieve API key on-demand");
+        eprintln!(
+            "                               (default: {})",
+            Self::DEFAULT_KEY_CMD
+        );
+        eprintln!("  -m, --default-model <MODEL>  Default model when not specified in tool calls");
+        eprintln!(
+            "                               (default: {})",
+            Self::DEFAULT_FALLBACK_MODEL
+        );
+        eprintln!("  -u, --base-url <URL>        Base URL for AgentRouter API");
+        eprintln!(
+            "                               (default: {})",
+            Self::DEFAULT_BASE_URL
+        );
+        eprintln!(
+            "  -t, --timeout <SECS>        HTTP timeout in seconds (default: {})",
+            Self::DEFAULT_TIMEOUT_SECS
+        );
+        eprintln!(
+            "  -a, --api-mode <MODE>       API routing mode: auto (default), responses, completions"
+        );
+        eprintln!(
+            "      --user-agent <UA>       User-Agent header for Cloudflare WAF (default: {})",
+            Self::DEFAULT_USER_AGENT
+        );
+        eprintln!("      --sessions-dir <PATH>   Directory for persistent session JSON files");
+        eprintln!(
+            "                               (default: $XDG_DATA_HOME/agentrouter-mcp/sessions)"
+        );
+        eprintln!(
+            "      --max-history <N>       Maximum retained messages per session, >= 1 (default: {})",
+            Self::DEFAULT_MAX_HISTORY_MESSAGES
+        );
+        eprintln!("      --env-file <PATH>       Path to .env configuration file");
+        eprintln!("  -h, --help                  Print this help message");
     }
 
     fn load_env_file_hierarchy(config: &mut Self, custom_path: Option<&Path>) {
@@ -312,6 +405,17 @@ impl AppConfig {
                         "AGENTROUTER_USER_AGENT" | "USER_AGENT" if !val.is_empty() => {
                             config.user_agent = val.to_string();
                         }
+                        "AGENTROUTER_SESSIONS_DIR" | "SESSIONS_DIR" if !val.is_empty() => {
+                            config.sessions_dir = PathBuf::from(val);
+                        }
+                        "AGENTROUTER_MAX_HISTORY" | "MAX_HISTORY" => {
+                            match Self::parse_max_history(val) {
+                                Ok(n) => config.max_history_messages = n,
+                                Err(e) => {
+                                    eprintln!("Warning: invalid MAX_HISTORY in .env '{val}': {e}")
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -335,6 +439,100 @@ mod tests {
         assert_eq!(config.api_key, None);
         assert_eq!(config.api_mode, ApiMode::Auto);
         assert_eq!(config.user_agent, AppConfig::DEFAULT_USER_AGENT);
+        assert_eq!(
+            config.max_history_messages,
+            AppConfig::DEFAULT_MAX_HISTORY_MESSAGES
+        );
+        assert!(config.sessions_dir.ends_with("agentrouter-mcp/sessions"));
+    }
+
+    #[test]
+    fn test_resolve_default_sessions_dir_fallbacks() {
+        assert_eq!(
+            AppConfig::resolve_default_sessions_dir(Some("/custom/xdg"), Some("/home/user")),
+            PathBuf::from("/custom/xdg/agentrouter-mcp/sessions")
+        );
+        assert_eq!(
+            AppConfig::resolve_default_sessions_dir(Some("  "), Some("/home/user")),
+            PathBuf::from("/home/user/.local/share/agentrouter-mcp/sessions")
+        );
+        assert_eq!(
+            AppConfig::resolve_default_sessions_dir(None, Some("/home/user")),
+            PathBuf::from("/home/user/.local/share/agentrouter-mcp/sessions")
+        );
+        assert_eq!(
+            AppConfig::resolve_default_sessions_dir(None, None),
+            std::env::temp_dir().join("agentrouter-mcp/sessions")
+        );
+    }
+
+    #[test]
+    fn test_parse_max_history_validation() {
+        assert_eq!(AppConfig::parse_max_history("1"), Ok(1));
+        assert_eq!(AppConfig::parse_max_history(" 42 "), Ok(42));
+        assert!(AppConfig::parse_max_history("0").is_err());
+        assert!(AppConfig::parse_max_history("-5").is_err());
+        assert!(AppConfig::parse_max_history("abc").is_err());
+    }
+
+    #[test]
+    fn test_apply_env_file_sessions_dir_and_max_history() {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "agentrouter-config-test-{}-{}",
+            std::process::id(),
+            "env"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let env_path = dir.join(".env");
+        std::fs::write(&env_path, "SESSIONS_DIR=/tmp/my-sessions\nMAX_HISTORY=50\n")
+            .expect("write env");
+
+        let mut config = AppConfig::default();
+        AppConfig::apply_env_file(&env_path, &mut config);
+        assert_eq!(config.sessions_dir, PathBuf::from("/tmp/my-sessions"));
+        assert_eq!(config.max_history_messages, 50);
+
+        // Invalid MAX_HISTORY=0 keeps existing value
+        std::fs::write(
+            &env_path,
+            "AGENTROUTER_SESSIONS_DIR=/tmp/other\nAGENTROUTER_MAX_HISTORY=0\n",
+        )
+        .expect("write env");
+        AppConfig::apply_env_file(&env_path, &mut config);
+        assert_eq!(config.sessions_dir, PathBuf::from("/tmp/other"));
+        assert_eq!(config.max_history_messages, 50);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_apply_cli_args_sessions_dir_and_max_history() {
+        let mut config = AppConfig::default();
+        let args = vec![
+            "agentrouter-mcp".to_string(),
+            "--sessions-dir".to_string(),
+            "/var/tmp/ar-sessions".to_string(),
+            "--max-history".to_string(),
+            "12".to_string(),
+        ];
+        assert_eq!(AppConfig::apply_cli_args(&mut config, &args), Ok(true));
+        assert_eq!(config.sessions_dir, PathBuf::from("/var/tmp/ar-sessions"));
+        assert_eq!(config.max_history_messages, 12);
+
+        let bad_history = vec![
+            "agentrouter-mcp".to_string(),
+            "--max-history".to_string(),
+            "0".to_string(),
+        ];
+        assert!(AppConfig::apply_cli_args(&mut config, &bad_history).is_err());
+
+        let bad_dir = vec![
+            "agentrouter-mcp".to_string(),
+            "--sessions-dir".to_string(),
+            "   ".to_string(),
+        ];
+        assert!(AppConfig::apply_cli_args(&mut config, &bad_dir).is_err());
     }
 
     #[test]

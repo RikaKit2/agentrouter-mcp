@@ -27,8 +27,25 @@ pub struct ChatRequest {
 /// Request parameters for the `reset_chat` MCP tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ResetChatRequest {
-    /// Session identifier to clear from memory.
+    /// Session identifier to clear from memory and disk.
     pub session_id: String,
+}
+
+/// Request parameters for the `list_sessions` MCP tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListSessionsRequest {
+    /// Optional maximum number of sessions to return (sorted by most recently updated first).
+    pub limit: Option<usize>,
+}
+
+/// Request parameters for the `get_session_history` MCP tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetSessionHistoryRequest {
+    /// Session identifier whose persisted message history should be retrieved.
+    pub session_id: String,
+
+    /// Optional limit to return only the last N messages from the session.
+    pub last_n: Option<usize>,
 }
 
 /// Request parameters for the `agentrouter_health` MCP tool.
@@ -39,7 +56,7 @@ pub struct HealthRequest {
 }
 
 /// Message within an OpenAI-compatible chat payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,

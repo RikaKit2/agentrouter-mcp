@@ -5,6 +5,7 @@ mod auth;
 mod client;
 mod config;
 mod server;
+mod session_store;
 mod types;
 
 use anyhow::Result;
@@ -28,12 +29,14 @@ async fn main() -> Result<()> {
         false => format!("key_cmd: '{}'", config.key_cmd),
     };
     tracing::info!(
-        "Initializing AgentRouter MCP server (default_model: '{}', key_source: '{}', base_url: '{}', timeout: {}s, api_mode: '{:?}')",
+        "Initializing AgentRouter MCP server (default_model: '{}', key_source: '{}', base_url: '{}', timeout: {}s, api_mode: '{:?}', sessions_dir: '{}', max_history: {})",
         config.default_model,
         key_source,
         config.base_url,
         config.timeout_secs,
-        config.api_mode
+        config.api_mode,
+        config.sessions_dir.display(),
+        config.max_history_messages
     );
 
     let server = AgentRouterServer::new(config)?;
