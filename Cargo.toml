@@ -1,6 +1,6 @@
 [package]
 name = "agentrouter-mcp"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "High-performance model-agnostic stdio MCP server for AgentRouter with context files and session support"
 authors = ["RikaKit2"]
